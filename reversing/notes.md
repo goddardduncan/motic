@@ -189,3 +189,23 @@ Supersedes the "2048x1200 16-bit" guess in an earlier commit — that was wrong.
   room light; 10 gives a mid-grey image. Row time ~5 ms at default clocks.
 - The 0xB0/0xB1 control transfers from grab.py STALL on this unit and are
   not needed.
+
+## Bridge clock command (the missing init step)
+
+`setFrequencyIndex` (vtable +0xA0, fcn.18001d5c0) sends
+`ctrl_transfer(0x40, 0xF6, wValue=index, 0, none)`, index 0/1/2, and stores
+a row-time constant 48000/24000/12000 (≈ 48/24/12 MHz). The constructor sets
+index 1 in the object but never sends it; power-on default is far slower.
+
+Measured on this unit:
+
+| clock | throughput | full-frame rate |
+| --- | --- | --- |
+| power-on default | 0.4 MB/s | ~0.13 fps |
+| 0xF6 idx 1 | 6.4 MB/s | ~2 fps |
+| 0xF6 idx 0 | 12.6 MB/s | ~4 fps |
+
+At idx 0, shutter 1000 rows ≈ mid-grey under room light (no optics).
+Still unresolved: every row has an identical horizontal profile
+(row-mean std < 1) in all scenes tried so far — need an optical image to
+tell whether that's the scene or a readout issue.
