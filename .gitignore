@@ -10,3 +10,6 @@ reversing/motic-ipp/
 *.sys
 *.cab
 *.hdr
+captures/
+*.egg-info/
+build/

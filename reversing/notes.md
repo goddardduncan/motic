@@ -209,3 +209,12 @@ At idx 0, shutter 1000 rows ≈ mid-grey under room light (no optics).
 Still unresolved: every row has an identical horizontal profile
 (row-mean std < 1) in all scenes tried so far — need an optical image to
 tell whether that's the scene or a readout issue.
+- Bridge clock: `ctrl_transfer(0x40, 0xF6, wValue=index, 0)` from
+  `setFrequencyIndex` (fcn.18001d5c0). Index 0/1/2 -> row-time constants
+  48000/24000/12000. Power-on state streams only ~0.4 MB/s; index 1 gives
+  6.4 MB/s, index 0 gives 12.6 MB/s (~4 fps at 2048x1536). The DLL's
+  ctor stores index 1 but only sends the command when it's called.
+- `getFrame` path (fcn.18001da10) reads exactly W*H bytes per ReadPipe;
+  vtable slot 0 (fcn.180007160) returns [+0x38]*[+0x3c].
+- setROI internals (fcn.18001d070) read 8 bytes from reg 0x01 (regs
+  0x01-0x04) and write the window plus row/col address mode (0x22/0x23).
