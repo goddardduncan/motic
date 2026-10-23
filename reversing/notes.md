@@ -170,3 +170,22 @@ Not yet linked into the setExposure code path.
    actual register writes.
 5. Decode `setROI` and `setRGBGainValue` — these are the only non-stub
    setters exposed to the user.
+
+## Confirmed on hardware (0634:3222, class MUCamMC3222)
+
+Supersedes the "2048x1200 16-bit" guess in an earlier commit — that was wrong.
+
+- RTTI: vtable `0x180033df8` is `MUCamMC3222`; its initializer is
+  `MUCamMC3001Initializer` (`0x180036f40`), which allocates a `0x300000`
+  (2048 x 1536 x 1 byte) frame buffer and builds MT9T001 gain tables.
+- Sensor register access (fcn.18001ffb0 / fcn.180020040):
+  - read : `ctrl_transfer(0xC0, 0xF1, 0xBA00|reg, 0, 2)` -> big-endian u16
+  - write: `ctrl_transfer(0x40, 0xF0, 0xBA00|reg, 0, [hi, lo])`
+- Chip version reg 0x00 = `0x1621` -> **Micron MT9T001**, window 2048 x 1536
+  (regs 0x03/0x04), row start 20, col start 32.
+- Stream: back-to-back **8-bit Bayer** frames of 3 MiB, no headers, no
+  short-packet frame markers. ~0.4 MB/s at power-on clocking (~8 s/frame).
+- Exposure = reg 0x09 shutter width in rows. Default 1561 saturates under
+  room light; 10 gives a mid-grey image. Row time ~5 ms at default clocks.
+- The 0xB0/0xB1 control transfers from grab.py STALL on this unit and are
+  not needed.
