@@ -16,8 +16,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .camera import (MIRROR_COLS, MIRROR_ROWS, PIXEL_CLOCK_HZ, REG, SENSOR_H, SENSOR_W,
-                     FrameReader, MoticCamera)
+from .camera import (MIRROR_COLS, MIRROR_ROWS, MT9T001_CHIP_VERSION, PIXEL_CLOCK_HZ, REG,
+                     SENSOR_H, SENSOR_W, CameraBusy, CameraNotFound, FrameReader, MoticCamera)
+
+DEFAULT_CAPTURES = Path.home() / "Pictures" / "Motic"
 
 PATTERNS = [
     ("GRBG", cv2.COLOR_BayerGB2BGR),
@@ -336,10 +338,45 @@ def wait_frame(reader: FrameReader, after: int = -1, timeout: float = 5.0):
     raise RuntimeError("no frames from camera")
 
 
+def message_screen(lines: list[str]) -> np.ndarray:
+    img = np.full((300, DISPLAY_W, 3), 30, np.uint8)
+    draw_text(img, lines, 30, 80, 0.8)
+    return img
+
+
+def wait_for_camera(clock: int) -> MoticCamera | None:
+    """Open the camera, showing a waiting screen until it appears. None if the user quits."""
+    shown = False
+    while True:
+        try:
+            return MoticCamera(clock=clock)
+        except (CameraNotFound, CameraBusy) as e:
+            if isinstance(e, CameraBusy):
+                lines = ["The Motic camera is in use by another program.",
+                         "Close that program and this window will connect.", "", "Esc to quit"]
+            else:
+                lines = ["Looking for the Motic camera...",
+                         "Plug it into any USB port.", "", "Esc to quit"]
+            if not shown:
+                cv2.namedWindow("Motic", cv2.WINDOW_NORMAL)
+                shown = True
+            cv2.imshow("Motic", message_screen(lines))
+            if (cv2.waitKey(700) & 0xFF) == 27:
+                return None
+
+
 def run_live(cam: MoticCamera, reader: FrameReader, captures: Path) -> None:
     st = State()
     print(HELP)
-    seq, raw = wait_frame(reader)
+    if cam.chip_version != MT9T001_CHIP_VERSION:
+        st.note(f"Warning: unexpected sensor chip 0x{cam.chip_version:04X} - image may be wrong")
+    try:
+        seq, raw = wait_frame(reader)
+    except RuntimeError:
+        cv2.imshow("Motic", message_screen(["The camera was found but sent no images.",
+                                            "Unplug it, plug it back in, and reopen."]))
+        cv2.waitKey(0)
+        return
     prev = None
     view = render(raw, prev, st)
     cv2.namedWindow("Motic", cv2.WINDOW_NORMAL)
@@ -358,6 +395,12 @@ def run_live(cam: MoticCamera, reader: FrameReader, captures: Path) -> None:
                 if st.auto_exposure and n % 2 == 0:
                     auto_expose(cam, raw)
         now = time.monotonic()
+        if reader.error:
+            cv2.imshow("Motic", message_screen([reader.error, "Plug it back in and reopen the app.",
+                                                "", "Esc to quit"]))
+            while (cv2.waitKey(500) & 0xFF) != 27:
+                pass
+            break
         if st.message and now >= st.message_until:
             st.message, dirty = "", True
         if dirty:
@@ -393,14 +436,17 @@ def main() -> None:
                     help="0 = 48 MHz (default), 1 = 24 MHz, 2 = 12 MHz")
     ap.add_argument("--shutter", type=int, default=600, help="initial shutter width in rows")
     ap.add_argument("--snapshot", type=Path, help="save one auto-exposed frame here and exit")
-    ap.add_argument("--captures", type=Path, default=Path("captures"))
-    args = ap.parse_args()
+    ap.add_argument("--captures", type=Path, default=DEFAULT_CAPTURES,
+                    help=f"folder for saved images (default {DEFAULT_CAPTURES})")
+    args, _ = ap.parse_known_args()  # tolerate extra arguments macOS may pass to apps
 
-    cam = MoticCamera(clock=args.clock)
+    cam = MoticCamera(clock=args.clock) if args.snapshot else wait_for_camera(args.clock)
+    if cam is None:
+        return
     cam.apply_defaults()
     cam.set_shutter(args.shutter)
-    print(f"Sensor chip 0x{cam.chip_version:04X}, {SENSOR_W}x{SENSOR_H}, "
-          f"expected {cam.expected_fps():.1f} fps")
+    print(f"Camera {cam.usb_id}, sensor chip 0x{cam.chip_version:04X}, "
+          f"{SENSOR_W}x{SENSOR_H}, expected {cam.expected_fps():.1f} fps")
     reader = FrameReader(cam)
     try:
         if args.snapshot:

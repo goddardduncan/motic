@@ -1,4 +1,4 @@
-"""Driver for the Motic USB camera 0634:3222 (USB bridge + Micron MT9T001).
+"""Driver for the Motic USB camera 0634:3222 / 232F:4002 (USB bridge + Micron MT9T001).
 
 Protocol recovered from MUCam32.dll (class MUCamMC3222); see reversing/notes.md.
 
@@ -22,7 +22,9 @@ import usb.backend.libusb1
 import usb.core
 import usb.util
 
-VID, PID = 0x0634, 0x3222
+# Both IDs are dispatched to the MUCamMC3222 class by MUCam32.dll.
+SUPPORTED_IDS = [(0x0634, 0x3222), (0x232F, 0x4002)]
+MT9T001_CHIP_VERSION = 0x1621
 EP_IN = 0x82
 SENSOR_W, SENSOR_H = 2048, 1536
 PIXEL_CLOCK_HZ = {0: 48e6, 1: 24e6, 2: 12e6}
@@ -42,22 +44,41 @@ MIRROR_ROWS, MIRROR_COLS = 0x8000, 0x4000
 MAX_SHUTTER = 0xFFFF
 
 
+class CameraNotFound(RuntimeError):
+    pass
+
+
+class CameraBusy(RuntimeError):
+    pass
+
+
+def find_device():
+    backend = usb.backend.libusb1.get_backend(find_library=libusb_package.find_library)
+    for vid, pid in SUPPORTED_IDS:
+        dev = usb.core.find(idVendor=vid, idProduct=pid, backend=backend)
+        if dev is not None:
+            return dev
+    ids = ", ".join(f"{v:04x}:{p:04x}" for v, p in SUPPORTED_IDS)
+    raise CameraNotFound(f"No Motic camera found (looked for {ids})")
+
+
 class MoticCamera:
     def __init__(self, clock: int = 0):
-        backend = usb.backend.libusb1.get_backend(find_library=libusb_package.find_library)
-        dev = usb.core.find(idVendor=VID, idProduct=PID, backend=backend)
-        if dev is None:
-            raise RuntimeError(f"No Motic camera at {VID:04x}:{PID:04x}")
+        dev = find_device()
         try:
             dev.set_configuration()
         except usb.core.USBError:
             pass  # already configured
-        usb.util.claim_interface(dev, 0)
+        try:
+            usb.util.claim_interface(dev, 0)
+        except usb.core.USBError as e:
+            raise CameraBusy(f"Camera is in use by another program ({e})") from e
         try:
             dev.clear_halt(EP_IN)
         except usb.core.USBError:
             pass
         self.dev = dev
+        self.usb_id = f"{dev.idVendor:04x}:{dev.idProduct:04x}"
         self.chip_version = self.read_reg(REG["chip"])
         self.shutter = self.read_reg(REG["shutter"])
         self.set_clock(clock)
@@ -111,7 +132,10 @@ class MoticCamera:
             return 0
 
     def close(self) -> None:
-        usb.util.release_interface(self.dev, 0)
+        try:
+            usb.util.release_interface(self.dev, 0)
+        except usb.core.USBError:
+            pass  # already unplugged
         usb.util.dispose_resources(self.dev)
 
 
@@ -132,6 +156,7 @@ class FrameReader:
         self.width, self.height = cam.geometry()
         self.frames = 0
         self.partials = 0
+        self.error: str | None = None
         self.last_len = 0
         self.mbps = 0.0
         self.fps = 0.0
@@ -164,13 +189,23 @@ class FrameReader:
         pending = bytearray()
         total, t_mark, frames_mark = 0, time.monotonic(), 0
         buf, buf_size = None, -1
+        errors = 0
         while not self._stop.is_set():
             native = self.request_size == self.NATIVE
             size = self.frame_bytes + 4096 if native else self.request_size
             if size != buf_size:
                 buf, buf_size = usb.util.create_buffer(size), size
                 pending.clear()
-            n = self.cam.read_into(buf)
+            try:
+                n = self.cam.read_into(buf)
+                errors = 0
+            except usb.core.USBError as e:
+                errors += 1
+                if errors >= 5:
+                    self.error = f"Camera disconnected ({e})"
+                    return
+                time.sleep(0.2)
+                continue
             total += n
             if n:
                 self.last_len = n
