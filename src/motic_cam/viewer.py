@@ -1,7 +1,7 @@
 """Live viewer and diagnostic test bench for the Motic USB camera.
 
-    motic-live                      # live window
-    motic-live --snapshot out.png   # headless: settle exposure, save one frame
+    moticam-viewer                    # live window
+    moticam-viewer --snapshot out.png # headless: settle exposure, save one frame
 
 Press ; in the window for the key map. Esc quits, space saves.
 """
@@ -20,6 +20,7 @@ from .camera import (GAIN_STEPS, MIRROR_COLS, MIRROR_ROWS, MT9T001_CHIP_VERSION,
                      SENSOR_H, SENSOR_W, CameraBusy, CameraNotFound, FrameReader, MoticCamera)
 
 DEFAULT_CAPTURES = Path.home() / "Pictures" / "Motic"
+WINDOW = "Moticam Viewer (unofficial)"
 
 PATTERNS = [
     ("GRBG", cv2.COLOR_BayerGB2BGR),
@@ -57,7 +58,8 @@ TRANSPORT / SENSOR TIMING (writes camera)
 EXPOSURE / COLOUR
  a auto exposure   s shutter down   d shutter up   f gain 1/2/4/8x
  g gamma   h auto white balance   j reset camera defaults   k save   l print registers
- ; this help      ' reset all tests     space save     Esc quit"""
+ ; this help      ' reset all tests     space save     Esc quit
+Unofficial software - not affiliated with or endorsed by Motic."""
 
 
 class State:
@@ -378,9 +380,9 @@ def wait_for_camera(clock: int) -> MoticCamera | None:
                 lines = ["Looking for the Motic camera...",
                          "Plug it into any USB port.", "", "Esc to quit"]
             if not shown:
-                cv2.namedWindow("Motic", cv2.WINDOW_NORMAL)
+                cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
                 shown = True
-            cv2.imshow("Motic", message_screen(lines))
+            cv2.imshow(WINDOW, message_screen(lines))
             if (cv2.waitKey(700) & 0xFF) == 27:
                 return None
 
@@ -393,14 +395,14 @@ def run_live(cam: MoticCamera, reader: FrameReader, captures: Path) -> None:
     try:
         seq, raw = wait_frame(reader)
     except RuntimeError:
-        cv2.imshow("Motic", message_screen(["The camera was found but sent no images.",
+        cv2.imshow(WINDOW, message_screen(["The camera was found but sent no images.",
                                             "Unplug it, plug it back in, and reopen."]))
         cv2.waitKey(0)
         return
     prev = None
     view = render(raw, prev, st)
-    cv2.namedWindow("Motic", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("Motic", DISPLAY_W, DISPLAY_W * 3 // 4)
+    cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(WINDOW, DISPLAY_W, DISPLAY_W * 3 // 4)
     n = 0
     dirty = True
     stats: list[str] = []
@@ -416,7 +418,7 @@ def run_live(cam: MoticCamera, reader: FrameReader, captures: Path) -> None:
                     auto_expose(cam, raw)
         now = time.monotonic()
         if reader.error:
-            cv2.imshow("Motic", message_screen([reader.error, "Plug it back in and reopen the app.",
+            cv2.imshow(WINDOW, message_screen([reader.error, "Plug it back in and reopen the app.",
                                                 "", "Esc to quit"]))
             while (cv2.waitKey(500) & 0xFF) != 27:
                 pass
@@ -431,12 +433,14 @@ def run_live(cam: MoticCamera, reader: FrameReader, captures: Path) -> None:
                 draw_text(view, stats, 10, 22)
             if st.help:
                 overlay = view.copy()
-                cv2.rectangle(overlay, (0, 0), (view.shape[1], 330), (0, 0, 0), -1)
+                help_lines = HELP.splitlines()
+                cv2.rectangle(overlay, (0, 0), (view.shape[1], 110 + 22 * len(help_lines)),
+                              (0, 0, 0), -1)
                 view = cv2.addWeighted(overlay, 0.75, view, 0.25, 0)
-                draw_text(view, HELP.splitlines(), 10, 110, 0.5)
+                draw_text(view, help_lines, 10, 110, 0.5)
             if st.message:
                 draw_text(view, [st.message], 10, view.shape[0] - 20, 0.7)
-            cv2.imshow("Motic", view)
+            cv2.imshow(WINDOW, view)
             dirty = False
 
         k = cv2.waitKey(10) & 0xFF

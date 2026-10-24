@@ -1,8 +1,13 @@
-# motic
+# Moticam Viewer (unofficial)
 
 A driver and live viewer for an old Motic USB microscope camera, written by
-reverse-engineering the vendor's Windows SDK. It runs on macOS, should run on
-Windows and Linux (anything libusb supports), and needs no Motic software.
+reverse-engineering the vendor's Windows SDK for interoperability. It runs on
+macOS, should run on Windows and Linux (anything libusb supports), and needs
+no Motic software.
+
+> **Unofficial.** This project is not affiliated with, endorsed by, or
+> supported by Motic. "Motic" and "Moticam" are used only to say which
+> hardware this works with. No Motic code, drivers or binaries are included.
 
 Supported camera: USB ID `0634:3222` ("Motic USB2.0"), Micron MT9T001
 sensor, 2048 × 1536. The SDK treats `232F:4002` as the same camera type,
@@ -20,7 +25,7 @@ one-time WinUSB driver step.
 ```
 python3 -m venv .venv
 .venv/bin/pip install -e .
-.venv/bin/motic-live
+.venv/bin/moticam-viewer
 ```
 
 Press `;` in the window for the key map: display modes, exposure, gain,
@@ -49,3 +54,7 @@ At 48 MHz the camera delivers full-resolution frames at about 12 fps.
 - `packaging/`: app build scripts for macOS and Windows
 - `tools/`: the probes used during reverse engineering
 - `reversing/`: notes on the Windows SDK internals
+
+## Licence
+
+MIT, see [LICENSE](LICENSE).

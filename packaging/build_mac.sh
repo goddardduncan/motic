@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Build "Motic Live.app" and a shareable zip in dist/.
+# Build "Moticam Viewer.app" and a shareable zip in dist/.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -9,15 +9,15 @@ fi
 .venv/bin/python -m pip install --quiet -e . pyinstaller
 
 .venv/bin/pyinstaller --noconfirm --clean --windowed \
-  --name "Motic Live" \
-  --osx-bundle-identifier org.motic-cam.live \
+  --name "Moticam Viewer" \
+  --osx-bundle-identifier io.github.goddardduncan.moticam-viewer \
   --collect-all libusb_package \
   --distpath dist --workpath build/pyinstaller --specpath build \
   packaging/motic_live_app.py
 
 arch=$(uname -m)
-cp packaging/README-friend.txt "dist/READ ME FIRST.txt"
-rm -f "dist/Motic-Live-mac-$arch.zip"
-(cd dist && ditto -c -k --sequesterRsrc --keepParent "Motic Live.app" "Motic-Live-mac-$arch.zip" \
-  && zip -q "Motic-Live-mac-$arch.zip" "READ ME FIRST.txt")
-echo "Built dist/Motic Live.app and dist/Motic-Live-mac-$arch.zip"
+cp packaging/README-mac.txt "dist/READ ME FIRST.txt"
+rm -f "dist/Moticam-Viewer-mac-$arch.zip"
+(cd dist && ditto -c -k --sequesterRsrc --keepParent "Moticam Viewer.app" "Moticam-Viewer-mac-$arch.zip" \
+  && zip -q "Moticam-Viewer-mac-$arch.zip" "READ ME FIRST.txt")
+echo "Built dist/Moticam Viewer.app and dist/Moticam-Viewer-mac-$arch.zip"

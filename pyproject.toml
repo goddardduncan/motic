@@ -5,12 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "motic-cam"
 version = "0.1.0"
-description = "Driver and live viewer for the Motic 0634:3222 USB microscope camera"
+description = "Unofficial driver and viewer for the Motic 0634:3222 USB microscope camera (not affiliated with Motic)"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = ["pyusb", "libusb-package", "numpy", "opencv-python"]
 
 [project.scripts]
-motic-live = "motic_cam.viewer:main"
+moticam-viewer = "motic_cam.viewer:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

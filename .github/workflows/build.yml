@@ -27,5 +27,5 @@ jobs:
         run: ${{ matrix.script }}
       - uses: actions/upload-artifact@v4
         with:
-          name: motic-live-${{ matrix.os }}
+          name: moticam-viewer-${{ matrix.os }}
           path: dist/*.zip
