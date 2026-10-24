@@ -4,14 +4,17 @@ Protocol recovered from MUCam32.dll (class MUCamMC3222); see reversing/notes.md.
 
 - Sensor registers are reached through vendor control transfers that the
   bridge forwards to the sensor's I2C address 0xBA.
-- Control transfer 0xF6 sets the bridge clock: 0 = fast, 1 = medium,
-  2 = slow. The power-on default is very slow (~0.4 MB/s).
-- Bulk endpoint 0x82 carries back-to-back 8-bit Bayer frames of
-  WIDTH x HEIGHT bytes, with no headers or end-of-frame markers.
+- Control transfer 0xF6 sets the bridge/sensor clock: 0 = 48 MHz,
+  1 = 24 MHz, 2 = 12 MHz. Power-on is slower still.
+- Bulk endpoint 0x82 delivers one frame per transfer, terminated by a short
+  packet. A read request larger than a frame returns exactly one aligned
+  frame. If no read is pending, the bridge drops the rest of the frame,
+  so small reads produce torn, banded images.
 """
 from __future__ import annotations
 
 import threading
+import time
 
 import libusb_package
 import numpy as np
@@ -21,12 +24,21 @@ import usb.util
 
 VID, PID = 0x0634, 0x3222
 EP_IN = 0x82
-WIDTH, HEIGHT = 2048, 1536
-FRAME_BYTES = WIDTH * HEIGHT
+SENSOR_W, SENSOR_H = 2048, 1536
+PIXEL_CLOCK_HZ = {0: 48e6, 1: 24e6, 2: 12e6}
+ROW_OVERHEAD = 369  # extra clocks per row, from the DLL's exposure formula
 
-REG_CHIP_VERSION = 0x00
-REG_SHUTTER_UPPER = 0x08
-REG_SHUTTER = 0x09
+REG = {
+    "chip": 0x00, "row_start": 0x01, "col_start": 0x02, "row_size": 0x03,
+    "col_size": 0x04, "hblank": 0x05, "vblank": 0x06, "shutter_hi": 0x08,
+    "shutter": 0x09, "read_mode1": 0x1E, "read_mode2": 0x20,
+    "row_mode": 0x22, "col_mode": 0x23, "gain": 0x35,
+}
+DEFAULTS = {
+    "row_start": 20, "col_start": 32, "row_size": SENSOR_H - 1, "col_size": SENSOR_W - 1,
+    "hblank": 142, "vblank": 25, "row_mode": 0, "col_mode": 0, "gain": 0x08,
+}
+MIRROR_ROWS, MIRROR_COLS = 0x8000, 0x4000
 MAX_SHUTTER = 0xFFFF
 
 
@@ -46,8 +58,8 @@ class MoticCamera:
         except usb.core.USBError:
             pass
         self.dev = dev
-        self.chip_version = self.read_reg(REG_CHIP_VERSION)
-        self.shutter = self.read_reg(REG_SHUTTER)
+        self.chip_version = self.read_reg(REG["chip"])
+        self.shutter = self.read_reg(REG["shutter"])
         self.set_clock(clock)
 
     def read_reg(self, reg: int) -> int:
@@ -58,17 +70,39 @@ class MoticCamera:
         payload = bytes([(value >> 8) & 0xFF, value & 0xFF])
         self.dev.ctrl_transfer(0x40, 0xF0, 0xBA00 | reg, 0, payload, timeout=500)
 
+    def get(self, name: str) -> int:
+        return self.read_reg(REG[name])
+
+    def set(self, name: str, value: int) -> None:
+        self.write_reg(REG[name], int(value))
+
+    def apply_defaults(self) -> None:
+        for name, value in DEFAULTS.items():
+            self.set(name, value)
+        self.set("read_mode2", self.get("read_mode2") & ~(MIRROR_ROWS | MIRROR_COLS))
+
     def set_clock(self, index: int) -> None:
-        if index not in (0, 1, 2):
-            raise ValueError("clock index must be 0 (fast), 1 or 2 (slow)")
+        if index not in PIXEL_CLOCK_HZ:
+            raise ValueError("clock index must be 0 (48 MHz), 1 (24 MHz) or 2 (12 MHz)")
         self.dev.ctrl_transfer(0x40, 0xF6, index, 0, None, timeout=500)
         self.clock = index
 
-    def set_shutter(self, rows: int) -> None:
+    def set_shutter(self, rows: float) -> None:
         rows = int(max(1, min(rows, MAX_SHUTTER)))
-        self.write_reg(REG_SHUTTER_UPPER, 0)
-        self.write_reg(REG_SHUTTER, rows)
+        self.set("shutter_hi", 0)
+        self.set("shutter", rows)
         self.shutter = rows
+
+    def geometry(self) -> tuple[int, int]:
+        """Output (width, height) implied by the window and skip registers."""
+        col_skip = (self.get("col_mode") & 0x7) + 1
+        row_skip = (self.get("row_mode") & 0x7) + 1
+        return (self.get("col_size") + 1) // col_skip, (self.get("row_size") + 1) // row_skip
+
+    def expected_fps(self) -> float:
+        row_clocks = self.get("col_size") + 1 + self.get("hblank") + ROW_OVERHEAD
+        rows = self.get("row_size") + 1 + self.get("vblank")
+        return PIXEL_CLOCK_HZ[self.clock] / (row_clocks * rows)
 
     def read_into(self, buf) -> int:
         try:
@@ -81,93 +115,84 @@ class MoticCamera:
         usb.util.dispose_resources(self.dev)
 
 
-def column_phase(data: np.ndarray) -> int:
-    """Byte index (mod WIDTH) where rows start: the strongest jump between
-    same-colour pixels two apart is the right-edge/left-edge seam."""
-    n = (data.size - 2) // WIDTH * WIDTH
-    d = np.abs(data[2:n + 2].astype(np.int16) - data[:n].astype(np.int16))
-    per_col = d.reshape(-1, WIDTH).mean(axis=0)
-    i = int(np.argmax(per_col[::2] + per_col[1::2]))
-    return (2 * i + 2) % WIDTH
+class FrameReader:
+    """Background bulk reader.
 
-
-def row_phase(rows: np.ndarray) -> int:
-    """Row index (mod HEIGHT) where frames start: the strongest jump between
-    same-colour rows two apart is the bottom/top seam."""
-    n = (rows.shape[0] - 2) // HEIGHT * HEIGHT
-    d = np.abs(rows[2:n + 2].astype(np.int16) - rows[:n].astype(np.int16)).mean(axis=1)
-    per_row = d.reshape(-1, HEIGHT).mean(axis=0)
-    i = int(np.argmax(per_row[::2] + per_row[1::2]))
-    return (2 * i + 2) % HEIGHT
-
-
-class FrameStream:
-    """Reads the bulk stream on a background thread and slices it into frames.
-
-    Frame boundaries are tracked as absolute stream positions congruent to
-    `self.offset` modulo FRAME_BYTES, so dropping old data never loses sync.
+    In the normal mode each read is larger than a frame, so the bridge
+    returns exactly one aligned frame per transfer. Setting `request_size`
+    smaller than a frame switches to concatenating reads; that mode exists
+    only to reproduce the torn, three-band images.
     """
 
-    CHUNK = 1 << 20
-    KEEP_FRAMES = 3
+    NATIVE = 0
 
     def __init__(self, cam: MoticCamera):
         self.cam = cam
-        self.offset: int | None = None
-        self._buf = bytearray()
-        self._base = 0  # absolute stream position of _buf[0]
+        self.request_size = self.NATIVE
+        self.width, self.height = cam.geometry()
+        self.frames = 0
+        self.partials = 0
+        self.last_len = 0
+        self.mbps = 0.0
+        self.fps = 0.0
+        self._latest: np.ndarray | None = None
+        self._seq = 0
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
+    def set_geometry(self, width: int, height: int) -> None:
+        with self._lock:
+            self.width, self.height = width, height
+
+    @property
+    def frame_bytes(self) -> int:
+        return self.width * self.height
+
+    def _publish(self, data: bytes) -> None:
+        with self._lock:
+            w, h = self.width, self.height
+            if len(data) != w * h:
+                self.partials += 1
+                return
+            self._latest = np.frombuffer(data, dtype=np.uint8).reshape(h, w)
+            self._seq += 1
+            self.frames += 1
+
     def _run(self) -> None:
-        chunk = usb.util.create_buffer(self.CHUNK)
-        view = memoryview(chunk)
-        limit = (self.KEEP_FRAMES + 1) * FRAME_BYTES
+        pending = bytearray()
+        total, t_mark, frames_mark = 0, time.monotonic(), 0
+        buf, buf_size = None, -1
         while not self._stop.is_set():
-            n = self.cam.read_into(chunk)
-            if not n:
-                continue
-            with self._lock:
-                self._buf += view[:n]
-                excess = len(self._buf) - limit
-                if excess > 0:
-                    del self._buf[:excess]
-                    self._base += excess
+            native = self.request_size == self.NATIVE
+            size = self.frame_bytes + 4096 if native else self.request_size
+            if size != buf_size:
+                buf, buf_size = usb.util.create_buffer(size), size
+                pending.clear()
+            n = self.cam.read_into(buf)
+            total += n
+            if n:
+                self.last_len = n
+                if native:
+                    self._publish(bytes(memoryview(buf)[:n]))
+                else:
+                    pending += memoryview(buf)[:n]
+                    while len(pending) >= self.frame_bytes:
+                        self._publish(bytes(pending[:self.frame_bytes]))
+                        del pending[:self.frame_bytes]
+            now = time.monotonic()
+            if now - t_mark >= 1.0:
+                self.mbps = total / (now - t_mark) / 1e6
+                self.fps = (self.frames - frames_mark) / (now - t_mark)
+                total, t_mark, frames_mark = 0, now, self.frames
 
-    def calibrate(self) -> bool:
-        """Find frame alignment from at least two frames of buffered data."""
+    def latest(self, after: int = -1) -> tuple[int, np.ndarray | None]:
+        """Return (sequence number, frame). Frame is None if nothing newer than `after`."""
         with self._lock:
-            if len(self._buf) < 2 * FRAME_BYTES + WIDTH * 4:
-                return False
-            data = np.frombuffer(bytes(self._buf), dtype=np.uint8)
-            base = self._base
-        c0 = column_phase(data)
-        rows = data[c0:c0 + (data.size - c0) // WIDTH * WIDTH].reshape(-1, WIDTH)
-        r0 = row_phase(rows)
-        self.offset = (base + c0 + r0 * WIDTH) % FRAME_BYTES
-        return True
-
-    def nudge(self, nbytes: int) -> None:
-        if self.offset is not None:
-            self.offset = (self.offset + nbytes) % FRAME_BYTES
-
-    def latest_frame(self) -> np.ndarray | None:
-        """Most recent complete frame as a HEIGHT x WIDTH uint8 array."""
-        if self.offset is None:
-            return None
-        with self._lock:
-            end = self._base + len(self._buf)
-            k = (end - FRAME_BYTES - self.offset) // FRAME_BYTES
-            start = self.offset + k * FRAME_BYTES
-            if start < self._base:
-                return None
-            i = start - self._base
-            raw = bytes(self._buf[i:i + FRAME_BYTES])
-            del self._buf[:i + FRAME_BYTES]
-            self._base = start + FRAME_BYTES
-        return np.frombuffer(raw, dtype=np.uint8).reshape(HEIGHT, WIDTH)
+            if self._seq == after:
+                return self._seq, None
+            return self._seq, self._latest
 
     def close(self) -> None:
         self._stop.set()

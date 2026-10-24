@@ -1,3 +1,3 @@
-from .camera import FRAME_BYTES, HEIGHT, WIDTH, FrameStream, MoticCamera
+from .camera import SENSOR_H, SENSOR_W, FrameReader, MoticCamera
 
-__all__ = ["MoticCamera", "FrameStream", "WIDTH", "HEIGHT", "FRAME_BYTES"]
+__all__ = ["MoticCamera", "FrameReader", "SENSOR_W", "SENSOR_H"]

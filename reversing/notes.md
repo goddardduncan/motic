@@ -218,3 +218,13 @@ tell whether that's the scene or a readout issue.
   vtable slot 0 (fcn.180007160) returns [+0x38]*[+0x3c].
 - setROI internals (fcn.18001d070) read 8 bytes from reg 0x01 (regs
   0x01-0x04) and write the window plus row/col address mode (0x22/0x23).
+- Bulk framing: the bridge ends every frame with a short packet. A read
+  request larger than one frame returns exactly one aligned frame. While
+  no read is pending the bridge drops the rest of the current frame, so
+  1 MiB reads delivered exactly 1/3 of each frame -> "three horizontal
+  bands". Full rate at 48 MHz: 37.75 MB/s = 12 fps, matching
+  fps = clk / ((cols + hblank + 369) * (rows + vblank)).
+- HBLANK (0x05) is 11 bits; larger writes wrap.
+- Mirror bits in read mode 2 (0x20): 0x8000 rows, 0x4000 columns (accepted
+  by the sensor; visual effect still to confirm). Row/col skip in 0x22/0x23
+  low bits give 2048x768, 512x1536 etc. as expected.
