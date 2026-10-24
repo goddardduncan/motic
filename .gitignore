@@ -14,3 +14,4 @@ captures/
 *.egg-info/
 build/
 dist/
+.venv-win/

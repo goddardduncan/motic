@@ -3,6 +3,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+if [ ! -x .venv/bin/python ]; then
+  python3 -m venv .venv
+fi
+.venv/bin/python -m pip install --quiet -e . pyinstaller
+
 .venv/bin/pyinstaller --noconfirm --clean --windowed \
   --name "Motic Live" \
   --osx-bundle-identifier org.motic-cam.live \

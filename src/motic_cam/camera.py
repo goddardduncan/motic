@@ -42,6 +42,8 @@ DEFAULTS = {
 }
 MIRROR_ROWS, MIRROR_COLS = 0x8000, 0x4000
 MAX_SHUTTER = 0xFFFF
+# Global gain register values, from the DLL's MT9T001 gain table.
+GAIN_STEPS = [(0x08, "1x"), (0x10, "2x"), (0x20, "4x"), (0x60, "8x")]
 
 
 class CameraNotFound(RuntimeError):
@@ -81,6 +83,7 @@ class MoticCamera:
         self.usb_id = f"{dev.idVendor:04x}:{dev.idProduct:04x}"
         self.chip_version = self.read_reg(REG["chip"])
         self.shutter = self.read_reg(REG["shutter"])
+        self.gain_index = 0
         self.set_clock(clock)
 
     def read_reg(self, reg: int) -> int:
@@ -101,6 +104,16 @@ class MoticCamera:
         for name, value in DEFAULTS.items():
             self.set(name, value)
         self.set("read_mode2", self.get("read_mode2") & ~(MIRROR_ROWS | MIRROR_COLS))
+        self.gain_index = 0
+
+    def set_gain_index(self, index: int) -> None:
+        index = max(0, min(index, len(GAIN_STEPS) - 1))
+        self.set("gain", GAIN_STEPS[index][0])
+        self.gain_index = index
+
+    def fast_shutter_limit(self) -> int:
+        """Longest shutter (rows) that doesn't stretch the frame time."""
+        return self.get("row_size") + 1 + self.get("vblank")
 
     def set_clock(self, index: int) -> None:
         if index not in PIXEL_CLOCK_HZ:

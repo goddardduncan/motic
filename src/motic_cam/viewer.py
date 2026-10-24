@@ -16,7 +16,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .camera import (MIRROR_COLS, MIRROR_ROWS, MT9T001_CHIP_VERSION, PIXEL_CLOCK_HZ, REG,
+from .camera import (GAIN_STEPS, MIRROR_COLS, MIRROR_ROWS, MT9T001_CHIP_VERSION, PIXEL_CLOCK_HZ, REG,
                      SENSOR_H, SENSOR_W, CameraBusy, CameraNotFound, FrameReader, MoticCamera)
 
 DEFAULT_CAPTURES = Path.home() / "Pictures" / "Motic"
@@ -36,7 +36,6 @@ REQUEST_SIZES = [(FrameReader.NATIVE, "whole frame"), (1 << 20, "1 MiB (old, ban
 HBLANKS = [142, 500, 1000, 2000]
 VBLANKS = [25, 200, 800]
 SKIPS = [0, 1, 3]  # register values -> 1x, 2x, 4x
-GAINS = [(0x08, "1x"), (0x10, "2x"), (0x20, "4x"), (0x60, "8x")]
 WINDOWS = [  # (name, row_start, col_start, rows, cols) - starts kept even for Bayer phase
     ("full 2048x1536", 20, 32, 1536, 2048),
     ("spec 1600x1200", 188, 256, 1200, 1600),
@@ -83,7 +82,6 @@ class State:
         self.row_skip = 0
         self.col_skip = 0
         self.window = 0
-        self.gain = 0
         self.mirror_rows = False
         self.mirror_cols = False
         self.message = ""
@@ -99,7 +97,7 @@ class State:
             "request": REQUEST_SIZES[self.request][1], "hblank": HBLANKS[self.hblank],
             "vblank": VBLANKS[self.vblank], "row_skip": SKIPS[self.row_skip] + 1,
             "col_skip": SKIPS[self.col_skip] + 1, "window": WINDOWS[self.window][0],
-            "gain": GAINS[self.gain][1], "mirror_rows": self.mirror_rows,
+            "mirror_rows": self.mirror_rows,
             "mirror_cols": self.mirror_cols, "auto_wb": self.auto_wb, "gamma": self.gamma,
         }
 
@@ -181,7 +179,28 @@ def auto_expose(cam: MoticCamera, raw: np.ndarray) -> None:
         return
     else:
         ratio = float(np.clip(AE_TARGET / max(mean - 10.0, 1.0), 0.5, 2.0))
-    new = int(round(cam.shutter * ratio))
+    # Prefer shutter up to one frame time, then gain, and only then a longer
+    # shutter (which lowers the frame rate). Each gain step is 2x.
+    limit = cam.fast_shutter_limit()
+    want = cam.shutter * ratio
+    top_gain = len(GAIN_STEPS) - 1
+    if ratio > 1:
+        if cam.shutter < limit:
+            new = min(want, limit)
+        elif cam.gain_index < top_gain:
+            cam.set_gain_index(cam.gain_index + 1)
+            new = min(want / 2, limit)
+        else:
+            new = want
+    else:
+        if cam.shutter > limit:
+            new = max(want, limit)
+        elif cam.gain_index > 0 and want * 2 <= limit:
+            cam.set_gain_index(cam.gain_index - 1)
+            new = want * 2
+        else:
+            new = want
+    new = int(round(new))
     if new == cam.shutter:
         new += 1 if ratio > 1 else -1
     cam.set_shutter(new)
@@ -196,7 +215,7 @@ def save(raw: np.ndarray, view: np.ndarray, st: State, cam: MoticCamera, folder:
     cv2.imwrite(str(base) + "-view.png", view)
     base.with_suffix(".raw").write_bytes(raw.tobytes())
     meta = st.settings() | {"width": raw.shape[1], "height": raw.shape[0],
-                            "shutter": cam.shutter,
+                            "shutter": cam.shutter, "gain": GAIN_STEPS[cam.gain_index][1],
                             "registers": {k: cam.get(k) for k in REG}}
     base.with_suffix(".json").write_text(json.dumps(meta, indent=2))
     return base.with_suffix(".png")
@@ -291,9 +310,9 @@ def handle_key(k: int, cam: MoticCamera, reader: FrameReader, st: State) -> bool
         cam.set_shutter(cam.shutter * (0.8 if k == ord("s") else 1.25))
         st.note(f"shutter {cam.shutter}")
     elif k == ord("f"):
-        st.gain = (st.gain + 1) % len(GAINS)
-        cam.set("gain", GAINS[st.gain][0])
-        st.note(f"gain {GAINS[st.gain][1]}")
+        st.auto_exposure = False
+        cam.set_gain_index((cam.gain_index + 1) % len(GAIN_STEPS))
+        st.note(f"gain {GAIN_STEPS[cam.gain_index][1]} (auto exposure off)")
     elif k == ord("g"):
         st.gamma = not st.gamma
     elif k == ord("h"):
@@ -321,7 +340,8 @@ def stats_lines(cam: MoticCamera, reader: FrameReader, st: State, raw: np.ndarra
         f"frames {reader.frames}  torn/partial {reader.partials}  last read {reader.last_len:,}",
         f"frame {raw.shape[1]}x{raw.shape[0]}  clock {PIXEL_CLOCK_HZ[st.clock] / 1e6:.0f} MHz  "
         f"read {s['request']}  hblank {s['hblank']}  vblank {s['vblank']}",
-        f"shutter {cam.shutter}{' (auto)' if st.auto_exposure else ''}  gain {s['gain']}  "
+        f"shutter {cam.shutter}{' (auto)' if st.auto_exposure else ''}  "
+        f"gain {GAIN_STEPS[cam.gain_index][1]}  "
         f"bayer {s['pattern']}  view {s['view']}  window {s['window']}",
         f"skip rows {s['row_skip']}x cols {s['col_skip']}x  mirror rows {st.mirror_rows} "
         f"cols {st.mirror_cols}  mean {raw[::8, ::8].mean():5.1f}   ; = help",
@@ -452,15 +472,16 @@ def main() -> None:
         if args.snapshot:
             st = State()
             seq = -1
-            for _ in range(10):
+            for _ in range(30):
                 seq, raw = wait_frame(reader, seq)
                 auto_expose(cam, raw)
-            for _ in range(6):
+            for _ in range(12):
                 seq, raw = wait_frame(reader, seq)
                 img = finish(debayer(raw, st), st)
             args.snapshot.parent.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(args.snapshot), img)
             print(f"saved {args.snapshot}: {raw.shape[1]}x{raw.shape[0]}, shutter {cam.shutter}, "
+                  f"gain {GAIN_STEPS[cam.gain_index][1]}, mean {raw[::8, ::8].mean():.0f}, "
                   f"{reader.fps:.1f} fps, {reader.mbps:.1f} MB/s, torn {reader.partials}")
         else:
             run_live(cam, reader, args.captures)

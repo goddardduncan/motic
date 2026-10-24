@@ -1,0 +1,31 @@
+name: build apps
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            script: pwsh -File packaging/build_windows.ps1
+          - os: macos-latest      # Apple Silicon
+            script: ./packaging/build_mac.sh
+          - os: macos-15-intel    # Intel Macs; change if GitHub retires this image
+            script: ./packaging/build_mac.sh
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: ${{ matrix.script }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: motic-live-${{ matrix.os }}
+          path: dist/*.zip
